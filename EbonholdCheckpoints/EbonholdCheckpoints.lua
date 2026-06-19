@@ -257,7 +257,9 @@ local function Teleport(cp)
     if not (cp and cp.unlocked) then return end
     if svc and svc.UseCheckpoint then
         svc.UseCheckpoint(cp.id)
-        if EC.frame then EC.frame:Hide() end
+        -- En mode reduit (mini-barre de favoris) on garde la fenetre ouverte
+        -- pour enchainer les teleportations.
+        if EC.frame and not EC.db.compact then EC.frame:Hide() end
     end
 end
 
