@@ -1,9 +1,10 @@
 ## Interface: 30300
 ## Title: Ebonhold |cff66ccffCheckpoints|r
-## Notes: Teleportation rapide vers les checkpoints debloques (recherche + categories).
+## Notes: Teleportation rapide vers les checkpoints debloques (recherche + categories + favoris, FR/EN).
 ## Author: Guide Ebonhold
-## Version: 1.0
+## Version: 1.1
 ## Dependencies: ProjectEbonhold
 ## SavedVariables: EbonholdCheckpointsDB
 
+EbonholdCheckpoints_Names.lua
 EbonholdCheckpoints.lua

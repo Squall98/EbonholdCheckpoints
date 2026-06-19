@@ -6,12 +6,16 @@ Addon communautaire pour le serveur WoW [Project Ebonhold](https://www.project-e
 
 ## ✨ Fonctionnalités
 - **Liste de tous les checkpoints débloqués** — clic = téléportation immédiate.
-- **Recherche** instantanée par nom (lieu ou zone).
+- **Bilingue FR / EN** : interface **et noms** (villes, zones, donjons, raids) traduits — Hurlevent, Forgefer, Gouffre de Ragefeu… Un bouton bascule la langue d'un clic. Les noms français proviennent du client officiel.
+- **Recherche** instantanée par nom (FR ou EN), avec bouton pour vider.
+- **Favoris** : épingle tes destinations avec l'étoile ; section dédiée en tête + filtre « favoris seulement ».
+- **Mode réduit** : minimise la fenêtre pour n'afficher que tes favoris (redimensionnable en barre verticale ou horizontale).
 - **Onglets par continent** : Tous / Royaumes de l'Est / Kalimdor / Outreterre / Norfendre.
-- **Sections par type** : Points de vol, **Donjons** et **Raids** (pierres de réunion) — rejoins l'entrée d'un raid en un clic.
-- **« Afficher les verrouillés »** pour visualiser ce qu'il te reste à débloquer (grisé, non cliquable).
-- **Bouton minimap** déplaçable + commandes **`/tp`**, **`/cp`**, **`/checkpoint`**.
-- Mémorise la position de la fenêtre, l'onglet actif et tes préférences.
+- **Onglets par type** : Points de vol, **Donjons** et **Raids** — rejoins l'entrée d'un raid en un clic.
+- **Tri personnalisable** : par type, par nom (A-Z) ou par région.
+- **« Afficher les verrouillés »** pour visualiser ce qu'il te reste à débloquer.
+- **Fenêtre redimensionnable**, **bouton minimap** déplaçable + commandes **`/tp`**, **`/cp`**, **`/checkpoint`**.
+- Mémorise position, taille, langue, favoris et préférences.
 
 ## 📥 Installation
 1. Télécharge le **`EbonholdCheckpoints-vX.Y.zip`** de la dernière [release](../../releases), ou le dépôt (**Code → Download ZIP**).

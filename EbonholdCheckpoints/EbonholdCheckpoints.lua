@@ -7,6 +7,14 @@
           factionAllowed, kind, serverMapId, id, ... }
       ProjectEbonhold.CheckpointService.UseCheckpoint(id)  -> teleporte (meme appel
           que le clic sur le pin de la carte du monde).
+
+    Fonctions :
+      - Liste filtrable : recherche + onglets continents + onglets type (vol/donjon/raid).
+      - Favoris (etoile par destination, section "Favoris" + filtre "favoris seulement").
+      - Mode reduit : minimise la fenetre pour n'afficher que les favoris.
+      - Fenetre redimensionnable (poignee en bas a droite).
+      - Bilingue FR / EN (interface + noms de lieux) avec bouton de bascule.
+        Les noms FR sont dans EbonholdCheckpoints_Names.lua (extraits du client frFR).
 ---------------------------------------------------------------------------]]
 
 local ADDON_NAME = ...
@@ -16,56 +24,191 @@ _G.EbonholdCheckpoints = EC
 
 -- Preferences par defaut (SavedVariables)
 local DEFAULTS = {
-    showLocked = false,
-    continent  = "ALL",
+    lang         = "fr",
+    showLocked   = false,
+    favOnly      = false,
+    continent    = "ALL",
+    typeFilter   = "ALL",
+    sortMode     = "type",
     minimapAngle = 205,
     hideMinimap  = false,
+    favorites    = {},   -- [checkpointId] = true
+    compact      = false,
+    point        = nil,  -- position de la fenetre
+    width        = 384,
+    height       = 520,
+    compactW     = 240,
+    compactH     = 190,
 }
 
--- serverMapId -> nom de continent
+--==========================================================================
+-- Localisation
+--==========================================================================
+
+local LOCALE = {
+    fr = {
+        title = "Checkpoints",
+        favoritesSection = "Favoris",
+        flight = "Points de vol", dungeons = "Donjons", raids = "Raids",
+        search = "Rechercher...",
+        lockedLabel = "Verrouilles", lockedTip = "Afficher aussi les checkpoints verrouilles",
+        favLabel = "Favoris", favTip = "Afficher uniquement les favoris",
+        footer = "%d checkpoints debloques",
+        compactEmpty = "Aucun favori.\nClique l'etoile d'une destination pour l'epingler.",
+        travel = "Clic pour se teleporter.",
+        lockedRow = "Verrouille - a debloquer en jeu.",
+        addFav = "Ajouter aux favoris", removeFav = "Retirer des favoris",
+        expand = "Agrandir", minimize = "Reduire (favoris seulement)",
+        mmTitle = "Ebonhold Checkpoints",
+        mmClick = "Clic : ouvrir la liste de teleportation",
+        mmDrag = "Glisser : deplacer le bouton",
+        langTip = "Passer en anglais", langNext = "EN",
+        sortLabel = "Tri", sortType = "Type", sortName = "Nom (A-Z)", sortContinent = "Region",
+        allDest = "Destinations", other = "Autre",
+        c_all = "Tous", c_ek = "Est", c_kal = "Kalimdor", c_out = "Outreterre", c_north = "Norfendre",
+        t_all = "Tous", t_flight = "Vol", t_dungeons = "Donjons", t_raids = "Raids",
+    },
+    en = {
+        title = "Checkpoints",
+        favoritesSection = "Favorites",
+        flight = "Flight Points", dungeons = "Dungeons", raids = "Raids",
+        search = "Search...",
+        lockedLabel = "Locked", lockedTip = "Also show locked checkpoints",
+        favLabel = "Favorites", favTip = "Show favorites only",
+        footer = "%d unlocked checkpoints",
+        compactEmpty = "No favorites.\nClick a destination's star to pin it.",
+        travel = "Click to travel here.",
+        lockedRow = "Locked - unlock it in-game.",
+        addFav = "Add to favorites", removeFav = "Remove from favorites",
+        expand = "Expand", minimize = "Minimize (favorites only)",
+        mmTitle = "Ebonhold Checkpoints",
+        mmClick = "Click: open the teleport list",
+        mmDrag = "Drag: move the button",
+        langTip = "Switch to French", langNext = "FR",
+        sortLabel = "Sort", sortType = "Type", sortName = "Name (A-Z)", sortContinent = "Region",
+        allDest = "Destinations", other = "Other",
+        c_all = "All", c_ek = "EK", c_kal = "Kalimdor", c_out = "Outland", c_north = "Northrend",
+        t_all = "All", t_flight = "Flight", t_dungeons = "Dungeons", t_raids = "Raids",
+    },
+}
+
+function EC:L(key)
+    return (LOCALE[self.db.lang] or LOCALE.fr)[key]
+end
+
+-- serverMapId -> nom de continent (pour le tooltip)
 local CONTINENT_NAMES = {
-    [0]   = "Royaumes de l'Est",
-    [1]   = "Kalimdor",
-    [30]  = "Vallee d'Alterac",
-    [530] = "Outreterre",
-    [571] = "Norfendre",
-    [603] = "Ulduar",
+    fr = { [0] = "Royaumes de l'Est", [1] = "Kalimdor", [30] = "Vallee d'Alterac",
+           [530] = "Outreterre", [571] = "Norfendre", [603] = "Ulduar" },
+    en = { [0] = "Eastern Kingdoms", [1] = "Kalimdor", [30] = "Alterac Valley",
+           [530] = "Outland", [571] = "Northrend", [603] = "Ulduar" },
 }
 
--- Onglets de filtre par continent (les autres serverMapId restent visibles via "Tous")
+-- Traduit un nom de checkpoint token par token (FR uniquement).
+function EC:LocalizeName(name)
+    if self.db.lang ~= "fr" then return name end
+    local map = _G.EbonholdCheckpointsNames
+    if not map then return name end
+    local parts = {}
+    for token in string.gmatch(name, "[^,]+") do
+        token = token:gsub("^%s+", ""):gsub("%s+$", "")
+        parts[#parts + 1] = map[token] or token
+    end
+    return table.concat(parts, ", ")
+end
+
+-- Onglets de filtre par continent
 local CONTINENT_TABS = {
-    { key = "ALL", label = "Tous" },
-    { key = 0,     label = "Est" },
-    { key = 1,     label = "Kalimdor" },
-    { key = 530,   label = "Outreterre" },
-    { key = 571,   label = "Norfendre" },
+    { key = "ALL", lkey = "c_all" },
+    { key = 0,     lkey = "c_ek" },
+    { key = 1,     lkey = "c_kal" },
+    { key = 530,   lkey = "c_out" },
+    { key = 571,   lkey = "c_north" },
 }
 
--- kind du checkpoint -> categorie affichee. kind nil = point de vol classique.
+-- kind du checkpoint -> categorie. kind nil = point de vol classique.
 local function KindKey(kind)
     return kind or "FLIGHT"
 end
 
-local TYPE_LABELS = {
-    FLIGHT           = "Points de vol",
-    MEETINGSTONE     = "Donjons",
-    MEETINGSTONE_RAID = "Raids",
-}
+local TYPE_LKEY = { FLIGHT = "flight", MEETINGSTONE = "dungeons", MEETINGSTONE_RAID = "raids" }
 local TYPE_ORDER = { "FLIGHT", "MEETINGSTONE", "MEETINGSTONE_RAID" }
+local TYPE_INDEX = { FLIGHT = 1, MEETINGSTONE = 2, MEETINGSTONE_RAID = 3 }
 
-local TYPE_ICON = {
-    FLIGHT            = "Interface\\Minimap\\Tracking\\FlightMaster",
-    MEETINGSTONE      = "Interface\\Minimap\\Vehicle-AllianceMeetingStone",
-    MEETINGSTONE_RAID = "Interface\\Minimap\\Vehicle-AllianceMeetingStone",
+-- Tri par type (vol, donjons, raids) puis par nom.
+local function SortByTypeThenName(a, b)
+    local ka, kb = KindKey(a.kind), KindKey(b.kind)
+    if ka ~= kb then return TYPE_INDEX[ka] < TYPE_INDEX[kb] end
+    return a.name < b.name
+end
+
+local function SortByName(a, b)
+    return a.name < b.name
+end
+
+local function SortByContinentThenName(a, b)
+    local ca, cb = a.serverMapId or 0, b.serverMapId or 0
+    if ca ~= cb then return ca < cb end
+    return a.name < b.name
+end
+
+local function GetComparator(mode)
+    if mode == "name" then return SortByName
+    elseif mode == "continent" then return SortByContinentThenName
+    else return SortByTypeThenName end
+end
+
+-- Modes de tri proposes dans le menu
+local SORT_MODES = {
+    { key = "type",      lkey = "sortType" },
+    { key = "name",      lkey = "sortName" },
+    { key = "continent", lkey = "sortContinent" },
 }
+
+-- Onglets de filtre par type
+local TYPE_TABS = {
+    { key = "ALL",               lkey = "t_all" },
+    { key = "FLIGHT",            lkey = "t_flight" },
+    { key = "MEETINGSTONE",      lkey = "t_dungeons" },
+    { key = "MEETINGSTONE_RAID", lkey = "t_raids" },
+}
+
+-- tex = chemin texture ; coord = {l,r,t,b} optionnel (sous-region d'une planche).
+local TYPE_ICON = {
+    FLIGHT            = { tex = "Interface\\Minimap\\Tracking\\FlightMaster" },
+    MEETINGSTONE      = { tex = "Interface\\LFGFrame\\LFG-Eye", coord = { 0, 0.125, 0, 0.25 } },
+    MEETINGSTONE_RAID = { tex = "Interface\\Icons\\INV_Misc_Head_Dragon_01" },
+}
+
+local function ApplyTypeIcon(tex, kind)
+    local info = TYPE_ICON[KindKey(kind)] or TYPE_ICON.FLIGHT
+    tex:SetTexture(info.tex)
+    if info.coord then
+        tex:SetTexCoord(info.coord[1], info.coord[2], info.coord[3], info.coord[4])
+    else
+        tex:SetTexCoord(0, 1, 0, 1)
+    end
+end
+
+-- Etoile jaune des marqueurs de raid : texture standard, toujours presente.
+local STAR_TEXTURE = "Interface\\TargetingFrame\\UI-RaidTargetingIcon_1"
 
 local ROW_HEIGHT = 24
-local NUM_ROWS   = 16
 local FRAME_W    = 384
+local FRAME_H    = 520
+local MIN_W, MIN_H = 340, 320
+local MAX_W, MAX_H = 600, 820
+local COMPACT_W  = 240
+local LIST_TOP   = -130
+local LIST_BOTTOM = 46
 
 --==========================================================================
 -- Acces au service serveur
 --==========================================================================
+
+local function SetShown(obj, show)
+    if show then obj:Show() else obj:Hide() end
+end
 
 local function GetService()
     return ProjectEbonhold and ProjectEbonhold.CheckpointService
@@ -76,66 +219,33 @@ local function Normalize(s)
     return string.lower(s):gsub("%s+", " ")
 end
 
---==========================================================================
--- Construction de la liste affichee
---==========================================================================
+local function IsFavorite(id)
+    return EC.db and EC.db.favorites[id] == true
+end
 
--- Renvoie une liste plate de lignes :
---   { header = true, label = "..." }            -> en-tete de section
---   { cp = <checkpoint> }                        -> une destination
--- + le nombre total de destinations et le nombre de destinations debloquees.
-function EC:BuildRows()
-    local rows = {}
+local function ToggleFavorite(id)
+    if not EC.db then return end
+    if EC.db.favorites[id] then
+        EC.db.favorites[id] = nil
+    else
+        EC.db.favorites[id] = true
+    end
+end
+
+local function GetUniqueCheckpoints()
+    local out = {}
     local svc = GetService()
-    if not svc or not svc.GetCheckpoints then
-        return rows, 0, 0
-    end
-
+    if not svc or not svc.GetCheckpoints then return out end
     local list = svc.GetCheckpoints()
-    if type(list) ~= "table" then
-        return rows, 0, 0
-    end
-
-    local search = Normalize(self.search)
-    local continent = self.db.continent
-    local showLocked = self.db.showLocked
-
+    if type(list) ~= "table" then return out end
     local seen = {}
-    local buckets = { FLIGHT = {}, MEETINGSTONE = {}, MEETINGSTONE_RAID = {} }
-    local total, unlockedCount = 0, 0
-
     for _, cp in ipairs(list) do
         if cp.factionAllowed ~= false and not seen[cp.id] then
             seen[cp.id] = true
-
-            local passContinent = (continent == "ALL") or (cp.serverMapId == continent)
-            local passLocked = cp.unlocked or showLocked
-            local passSearch = (search == "")
-                or string.find(Normalize(cp.name), search, 1, true) ~= nil
-
-            if passContinent and passLocked and passSearch then
-                table.insert(buckets[KindKey(cp.kind)], cp)
-                total = total + 1
-            end
-
-            if cp.unlocked then
-                unlockedCount = unlockedCount + 1
-            end
+            table.insert(out, cp)
         end
     end
-
-    for _, k in ipairs(TYPE_ORDER) do
-        local bucket = buckets[k]
-        if #bucket > 0 then
-            table.sort(bucket, function(a, b) return a.name < b.name end)
-            table.insert(rows, { header = true, label = TYPE_LABELS[k] .. "  (" .. #bucket .. ")" })
-            for _, cp in ipairs(bucket) do
-                table.insert(rows, { cp = cp })
-            end
-        end
-    end
-
-    return rows, total, unlockedCount
+    return out
 end
 
 --==========================================================================
@@ -152,27 +262,129 @@ local function Teleport(cp)
 end
 
 --==========================================================================
--- Rafraichissement de l'affichage
+-- Construction de la liste (mode complet)
 --==========================================================================
+
+-- Lignes : { header=true, lkey=<cle locale>, count=N } ou { cp=<checkpoint> }.
+function EC:BuildRows()
+    local rows = {}
+    local search = Normalize(self.search)
+    local continent = self.db.continent
+    local typeFilter = self.db.typeFilter
+    local showLocked = self.db.showLocked
+    local favOnly = self.db.favOnly
+
+    local mode = self.db.sortMode or "type"
+    local cmp = GetComparator(mode)
+
+    local unlockedCount = 0
+    local favs = {}
+    local others = {}
+
+    for _, cp in ipairs(GetUniqueCheckpoints()) do
+        if cp.unlocked then unlockedCount = unlockedCount + 1 end
+
+        local k = KindKey(cp.kind)
+        -- la recherche porte sur le nom anglais ET le nom localise
+        local passSearch = (search == "")
+            or string.find(Normalize(cp.name), search, 1, true) ~= nil
+            or string.find(Normalize(self:LocalizeName(cp.name)), search, 1, true) ~= nil
+        local passType = (typeFilter == "ALL") or (k == typeFilter)
+        local passContinent = (continent == "ALL") or (cp.serverMapId == continent)
+
+        if IsFavorite(cp.id) and cp.unlocked and passSearch and passType and passContinent then
+            table.insert(favs, cp)
+        elseif not favOnly then
+            local passLocked = cp.unlocked or showLocked
+            if passContinent and passLocked and passSearch and passType then
+                table.insert(others, cp)
+            end
+        end
+    end
+
+    local function addSection(label, list)
+        table.insert(rows, { header = true, label = label, count = #list })
+        for _, cp in ipairs(list) do rows[#rows + 1] = { cp = cp } end
+    end
+
+    if #favs > 0 then
+        table.sort(favs, cmp)
+        addSection(self:L("favoritesSection"), favs)
+    end
+
+    if #others > 0 then
+        if mode == "name" then
+            table.sort(others, SortByName)
+            addSection(self:L("allDest"), others)
+        elseif mode == "continent" then
+            local groups, order = {}, {}
+            for _, cp in ipairs(others) do
+                local id = cp.serverMapId or -1
+                if not groups[id] then groups[id] = {}; order[#order + 1] = id end
+                table.insert(groups[id], cp)
+            end
+            table.sort(order)
+            for _, id in ipairs(order) do
+                table.sort(groups[id], SortByName)
+                addSection(CONTINENT_NAMES[self.db.lang][id] or self:L("other"), groups[id])
+            end
+        else -- type
+            local buckets = { FLIGHT = {}, MEETINGSTONE = {}, MEETINGSTONE_RAID = {} }
+            for _, cp in ipairs(others) do table.insert(buckets[KindKey(cp.kind)], cp) end
+            for _, k in ipairs(TYPE_ORDER) do
+                if #buckets[k] > 0 then
+                    table.sort(buckets[k], SortByName)
+                    addSection(self:L(TYPE_LKEY[k]), buckets[k])
+                end
+            end
+        end
+    end
+
+    return rows, unlockedCount
+end
+
+local function UpdateStarVisual(star, isFav)
+    if isFav then
+        star.tex:SetDesaturated(false)
+        star.tex:SetVertexColor(1, 1, 1)
+        star.tex:SetAlpha(1)
+    else
+        star.tex:SetDesaturated(true)
+        star.tex:SetVertexColor(0.8, 0.8, 0.8)
+        star.tex:SetAlpha(0.40)
+    end
+end
+
+function EC:VisibleRowCount()
+    local h = self.scroll:GetHeight()
+    if h <= 0 then h = self.listBG:GetHeight() - 8 end
+    return math.max(1, math.floor((h - 4) / ROW_HEIGHT))
+end
 
 function EC:Refresh()
     if not self.frame or not self.frame:IsShown() then return end
+    if self.db.compact then self:RefreshCompact() return end
 
-    local rows, total, unlockedCount = self:BuildRows()
+    local rows, unlockedCount = self:BuildRows()
     self.rows = rows
 
-    FauxScrollFrame_Update(self.scroll, #rows, NUM_ROWS, ROW_HEIGHT)
+    local numRows = self:VisibleRowCount()
+    self:EnsureRows(numRows)
+
+    FauxScrollFrame_Update(self.scroll, #rows, numRows, ROW_HEIGHT)
     local offset = FauxScrollFrame_GetOffset(self.scroll)
 
-    for i = 1, NUM_ROWS do
+    for i = 1, #self.rowButtons do
         local btn = self.rowButtons[i]
-        local data = rows[i + offset]
+        local data = (i <= numRows) and rows[i + offset] or nil
         if data then
             if data.header then
                 btn.cp = nil
                 btn.icon:Hide()
-                btn.text:SetText(data.label)
+                btn.star:Hide()
+                btn.text:SetText(data.label .. "  (" .. data.count .. ")")
                 btn.text:SetPoint("LEFT", btn, "LEFT", 6, 0)
+                btn.text:SetPoint("RIGHT", btn, "RIGHT", -4, 0)
                 btn.text:SetTextColor(1, 0.82, 0)
                 btn:EnableMouse(false)
                 btn.highlight:SetAlpha(0)
@@ -180,20 +392,25 @@ function EC:Refresh()
                 local cp = data.cp
                 btn.cp = cp
                 btn.icon:Show()
-                btn.icon:SetTexture(TYPE_ICON[KindKey(cp.kind)])
-                btn.text:SetText(cp.name)
+                ApplyTypeIcon(btn.icon, cp.kind)
+                btn.text:SetText(self:LocalizeName(cp.name))
                 btn.text:SetPoint("LEFT", btn, "LEFT", 26, 0)
+                btn.text:SetPoint("RIGHT", btn, "RIGHT", -24, 0)
                 btn:EnableMouse(true)
                 if cp.unlocked then
                     btn.text:SetTextColor(1, 1, 1)
                     btn.icon:SetDesaturated(false)
                     btn.icon:SetVertexColor(1, 1, 1)
                     btn.highlight:SetAlpha(0.30)
+                    btn.star:Show()
+                    btn.star.id = cp.id
+                    UpdateStarVisual(btn.star, IsFavorite(cp.id))
                 else
                     btn.text:SetTextColor(0.45, 0.45, 0.45)
                     btn.icon:SetDesaturated(true)
                     btn.icon:SetVertexColor(0.5, 0.5, 0.5)
                     btn.highlight:SetAlpha(0)
+                    btn.star:Hide()
                 end
             end
             btn:Show()
@@ -203,23 +420,209 @@ function EC:Refresh()
         end
     end
 
-    self.footer:SetText(unlockedCount .. " checkpoints debloques")
+    self.footer:SetText(string.format(self:L("footer"), unlockedCount))
+end
+
+--==========================================================================
+-- Mode reduit (favoris uniquement)
+--==========================================================================
+
+local function GetUnlockedFavorites()
+    local favs = {}
+    for _, cp in ipairs(GetUniqueCheckpoints()) do
+        if cp.unlocked and IsFavorite(cp.id) then
+            table.insert(favs, cp)
+        end
+    end
+    table.sort(favs, SortByTypeThenName)
+    return favs
+end
+
+function EC:GetCompactRow(i)
+    local b = self.compactRows[i]
+    if b then return b end
+
+    b = CreateFrame("Button", nil, self.compactFrame)
+    b:SetHeight(ROW_HEIGHT)
+    -- la position et la largeur sont definies par RefreshCompact (grille).
+
+    local hl = b:CreateTexture(nil, "HIGHLIGHT")
+    hl:SetAllPoints()
+    hl:SetTexture("Interface\\QuestFrame\\UI-QuestTitleHighlight")
+    hl:SetBlendMode("ADD")
+    hl:SetAlpha(0.3)
+
+    local icon = b:CreateTexture(nil, "ARTWORK")
+    icon:SetSize(16, 16)
+    icon:SetPoint("LEFT", b, "LEFT", 4, 0)
+    b.icon = icon
+
+    local text = b:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    text:SetPoint("LEFT", b, "LEFT", 26, 0)
+    text:SetPoint("RIGHT", b, "RIGHT", -4, 0)
+    text:SetJustifyH("LEFT")
+    b.text = text
+
+    b:SetScript("OnClick", function(self) if self.cp then Teleport(self.cp) end end)
+    b:SetScript("OnEnter", function(self)
+        if not self.cp then return end
+        GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+        GameTooltip:AddLine(EC:LocalizeName(self.cp.name), 1, 0.82, 0)
+        GameTooltip:AddLine(EC:L("travel"), 0.4, 1, 0.4)
+        GameTooltip:Show()
+    end)
+    b:SetScript("OnLeave", function() GameTooltip:Hide() end)
+
+    self.compactRows[i] = b
+    return b
+end
+
+local COMPACT_CELL_W = 150  -- largeur mini d'une colonne de favori
+
+function EC:RefreshCompact()
+    local favs = GetUnlockedFavorites()
+    local n = #favs
+
+    local availW = self.compactFrame:GetWidth()
+    if availW <= 0 then availW = (self.db.compactW or COMPACT_W) - 24 end
+
+    -- Le nombre de colonnes depend de la LARGEUR choisie par l'utilisateur ;
+    -- la hauteur de la fenetre s'ajuste ensuite pour tout contenir.
+    local maxCols = math.max(1, math.floor(availW / COMPACT_CELL_W))
+    local cols = math.max(1, math.min(maxCols, math.max(n, 1)))
+    local cellW = availW / cols
+
+    for i, cp in ipairs(favs) do
+        local b = self:GetCompactRow(i)
+        local col = (i - 1) % cols
+        local row = math.floor((i - 1) / cols)
+        b:ClearAllPoints()
+        b:SetPoint("TOPLEFT", self.compactFrame, "TOPLEFT", col * cellW, -row * ROW_HEIGHT)
+        b:SetWidth(cellW - 4)
+        b.cp = cp
+        ApplyTypeIcon(b.icon, cp.kind)
+        b.text:SetText(self:LocalizeName(cp.name))
+        b:Show()
+    end
+    for i = n + 1, #self.compactRows do
+        self.compactRows[i]:Hide()
+    end
+    SetShown(self.compactEmpty, n == 0)
+
+    -- Hauteur auto = juste ce qu'il faut pour contenir toutes les lignes.
+    local usedRows = math.max(1, math.ceil(math.max(n, 1) / cols))
+    local h = 34 + usedRows * ROW_HEIGHT + 12
+    if h > MAX_H then h = MAX_H end
+    if math.abs(self.frame:GetHeight() - h) > 0.5 then
+        self.frame:SetHeight(h)
+    end
+end
+
+--==========================================================================
+-- Bascule complet / reduit + langue
+--==========================================================================
+
+function EC:SetFullWidgetsShown(show)
+    for _, t in ipairs(self.contTabs) do SetShown(t, show) end
+    for _, t in ipairs(self.typeTabs) do SetShown(t, show) end
+    for _, w in ipairs({ self.searchBox, self.clearBtn, self.sortBtn, self.listBG, self.lockedCheck, self.favCheck, self.footer, self.resizeGrip }) do
+        SetShown(w, show)
+    end
+    if not show then self.sortMenu:Hide() end
+    if show and self.searchBox:GetText() == "" then
+        self.searchHint:Show()
+    else
+        self.searchHint:Hide()
+    end
+end
+
+function EC:UpdateSortLabel()
+    local lkey = "sortType"
+    for _, m in ipairs(SORT_MODES) do
+        if m.key == self.db.sortMode then lkey = m.lkey end
+    end
+    self.sortBtn.text:SetText(self:L(lkey))
+    self.sortBtn:SetWidth(self.sortBtn.text:GetStringWidth() + 18)
+end
+
+function EC:UpdateSortMenuTexts()
+    local maxw = 90
+    for _, opt in ipairs(self.sortOptions) do
+        opt.text:SetText(self:L(opt.lkey))
+        if opt.modeKey == self.db.sortMode then
+            opt.text:SetTextColor(1, 0.82, 0)
+        else
+            opt.text:SetTextColor(1, 1, 1)
+        end
+        maxw = math.max(maxw, opt.text:GetStringWidth() + 24)
+    end
+    self.sortMenu:SetWidth(maxw)
+end
+
+function EC:UpdateLocaleTexts()
+    self.searchHint:SetText(self:L("search"))
+    _G[self.lockedCheck:GetName() .. "Text"]:SetText(self:L("lockedLabel"))
+    _G[self.favCheck:GetName() .. "Text"]:SetText(self:L("favLabel"))
+    self.compactEmpty:SetText(self:L("compactEmpty"))
+    self.langBtn.text:SetText(self:L("langNext"))
+    for _, tab in ipairs(self.contTabs) do
+        tab.text:SetText(self:L(tab.lkey))
+        tab:SetWidth(tab.text:GetStringWidth() + 16)
+    end
+    for _, tab in ipairs(self.typeTabs) do
+        tab.text:SetText(self:L(tab.lkey))
+        tab:SetWidth(tab.text:GetStringWidth() + 16)
+    end
+    self:UpdateSortLabel()
+end
+
+function EC:SetLanguage(lang)
+    self.db.lang = lang
+    self:UpdateLocaleTexts()
+    self:ApplyMode()
+end
+
+function EC:ApplyMode()
+    local compact = self.db.compact
+    if compact then
+        self:SetFullWidgetsShown(false)
+        self.compactFrame:Show()
+        self.resizeGrip:Show()
+        self.title:SetText(self:L("favoritesSection"))
+        self.minBtn:SetNormalTexture("Interface\\Buttons\\UI-Panel-ExpandButton-Up")
+        self.minBtn:SetPushedTexture("Interface\\Buttons\\UI-Panel-ExpandButton-Down")
+        self.frame:SetMinResize(150, 64)
+        self.frame:SetSize(self.db.compactW or COMPACT_W, self.db.compactH or 190)
+        self:RefreshCompact()
+    else
+        self:SetFullWidgetsShown(true)
+        self.compactFrame:Hide()
+        self.title:SetText(self:L("title"))
+        self.minBtn:SetNormalTexture("Interface\\Buttons\\UI-Panel-CollapseButton-Up")
+        self.minBtn:SetPushedTexture("Interface\\Buttons\\UI-Panel-CollapseButton-Down")
+        self.frame:SetMinResize(MIN_W, MIN_H)
+        self.frame:SetSize(self.db.width or FRAME_W, self.db.height or FRAME_H)
+        self.lockedCheck:SetChecked(self.db.showLocked)
+        self.favCheck:SetChecked(self.db.favOnly)
+        self:UpdateTabs()
+        self:Refresh()
+    end
 end
 
 --==========================================================================
 -- Construction de l'interface
 --==========================================================================
 
-local function MakeTab(parent, info)
+local function MakeFilterTab(parent, info, group)
     local tab = CreateFrame("Button", nil, parent)
     tab:SetHeight(20)
     tab.key = info.key
+    tab.lkey = info.lkey
+    tab.group = group
 
     local fs = tab:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
     fs:SetPoint("CENTER")
-    fs:SetText(info.label)
     tab.text = fs
-    tab:SetWidth(fs:GetStringWidth() + 18)
 
     local bg = tab:CreateTexture(nil, "BACKGROUND")
     bg:SetAllPoints()
@@ -231,7 +634,12 @@ local function MakeTab(parent, info)
     hl:SetTexture(1, 1, 1, 0.12)
 
     tab:SetScript("OnClick", function(self)
-        EC.db.continent = self.key
+        if EC.searchBox then EC.searchBox:ClearFocus() end
+        if self.group == "continent" then
+            EC.db.continent = self.key
+        else
+            EC.db.typeFilter = self.key
+        end
         EC:UpdateTabs()
         EC:Refresh()
     end)
@@ -239,8 +647,8 @@ local function MakeTab(parent, info)
 end
 
 function EC:UpdateTabs()
-    for _, tab in ipairs(self.tabs) do
-        if tab.key == self.db.continent then
+    local function style(tab, active)
+        if active then
             tab.bg:SetTexture(0.20, 0.40, 0.65, 0.95)
             tab.text:SetTextColor(1, 1, 1)
         else
@@ -248,13 +656,95 @@ function EC:UpdateTabs()
             tab.text:SetTextColor(0.8, 0.8, 0.8)
         end
     end
+    for _, tab in ipairs(self.contTabs) do style(tab, tab.key == self.db.continent) end
+    for _, tab in ipairs(self.typeTabs) do style(tab, tab.key == self.db.typeFilter) end
+end
+
+local function MakeStar(parent)
+    local star = CreateFrame("Button", nil, parent)
+    star:SetSize(16, 16)
+    star:SetPoint("RIGHT", parent, "RIGHT", -4, 0)
+    star:SetFrameLevel(parent:GetFrameLevel() + 2)
+
+    local tex = star:CreateTexture(nil, "OVERLAY")
+    tex:SetAllPoints()
+    tex:SetTexture(STAR_TEXTURE)
+    star.tex = tex
+
+    star:SetScript("OnClick", function(self)
+        if not self.id then return end
+        ToggleFavorite(self.id)
+        EC:Refresh()
+    end)
+    star:SetScript("OnEnter", function(self)
+        GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+        GameTooltip:AddLine(IsFavorite(self.id) and EC:L("removeFav") or EC:L("addFav"), 1, 1, 1)
+        GameTooltip:Show()
+    end)
+    star:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    return star
+end
+
+function EC:CreateRow(i)
+    local scroll = self.scroll
+    local btn = CreateFrame("Button", nil, self.listBG)
+    btn:SetHeight(ROW_HEIGHT)
+    btn:SetPoint("TOPLEFT", scroll, "TOPLEFT", 0, -(i - 1) * ROW_HEIGHT)
+    btn:SetPoint("RIGHT", scroll, "RIGHT", 0, 0)
+
+    local hl = btn:CreateTexture(nil, "HIGHLIGHT")
+    hl:SetAllPoints()
+    hl:SetTexture("Interface\\QuestFrame\\UI-QuestTitleHighlight")
+    hl:SetBlendMode("ADD")
+    hl:SetAlpha(0.3)
+    btn.highlight = hl
+
+    local icon = btn:CreateTexture(nil, "ARTWORK")
+    icon:SetSize(16, 16)
+    icon:SetPoint("LEFT", btn, "LEFT", 4, 0)
+    btn.icon = icon
+
+    local text = btn:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    text:SetPoint("LEFT", btn, "LEFT", 26, 0)
+    text:SetPoint("RIGHT", btn, "RIGHT", -24, 0)
+    text:SetJustifyH("LEFT")
+    btn.text = text
+
+    btn.star = MakeStar(btn)
+
+    btn:SetScript("OnClick", function(self)
+        if self.cp and self.cp.unlocked then Teleport(self.cp) end
+    end)
+    btn:SetScript("OnEnter", function(self)
+        if not self.cp then return end
+        GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+        GameTooltip:AddLine(EC:LocalizeName(self.cp.name), 1, 0.82, 0)
+        local cont = CONTINENT_NAMES[EC.db.lang][self.cp.serverMapId]
+        if cont then GameTooltip:AddLine(cont, 0.7, 0.7, 0.7) end
+        if self.cp.unlocked then
+            GameTooltip:AddLine(EC:L("travel"), 0.4, 1, 0.4)
+        else
+            GameTooltip:AddLine(EC:L("lockedRow"), 1, 0.35, 0.35)
+        end
+        GameTooltip:Show()
+    end)
+    btn:SetScript("OnLeave", function() GameTooltip:Hide() end)
+
+    self.rowButtons[i] = btn
+    return btn
+end
+
+function EC:EnsureRows(n)
+    for i = #self.rowButtons + 1, n do
+        self:CreateRow(i)
+    end
 end
 
 function EC:BuildUI()
     if self.frame then return end
 
     local f = CreateFrame("Frame", "EbonholdCheckpointsFrame", UIParent)
-    f:SetSize(FRAME_W, 520)
+    f:SetSize(self.db.width or FRAME_W, self.db.height or FRAME_H)
     f:SetPoint("CENTER")
     f:SetFrameStrata("HIGH")
     f:SetBackdrop({
@@ -265,6 +755,9 @@ function EC:BuildUI()
     })
     f:EnableMouse(true)
     f:SetMovable(true)
+    f:SetResizable(true)
+    f:SetMinResize(MIN_W, MIN_H)
+    f:SetMaxResize(MAX_W, MAX_H)
     f:RegisterForDrag("LeftButton")
     f:SetScript("OnDragStart", f.StartMoving)
     f:SetScript("OnDragStop", function(self)
@@ -272,38 +765,194 @@ function EC:BuildUI()
         local point, _, relPoint, x, y = self:GetPoint()
         EC.db.point = { point, relPoint, x, y }
     end)
+    f:SetScript("OnSizeChanged", function(self)
+        if not EC.db then return end
+        if EC.db.compact then
+            EC.db.compactW = self:GetWidth()
+            EC.db.compactH = self:GetHeight()
+            EC:RefreshCompact()
+        else
+            EC.db.width = self:GetWidth()
+            EC.db.height = self:GetHeight()
+            EC:Refresh()
+        end
+    end)
+    f:SetScript("OnMouseDown", function()
+        if EC.searchBox then EC.searchBox:ClearFocus() end
+        if EC.sortMenu then EC.sortMenu:Hide() end
+    end)
     f:SetScript("OnShow", function() EC:OnShow() end)
     f:Hide()
-    tinsert(UISpecialFrames, "EbonholdCheckpointsFrame") -- fermeture avec Echap
+    tinsert(UISpecialFrames, "EbonholdCheckpointsFrame")
     self.frame = f
 
-    -- Titre
+    -- Capteur de clic plein ecran (sous la fenetre) : un clic en dehors de la
+    -- zone de texte fait perdre le focus a la recherche.
+    local catcher = CreateFrame("Button", nil, UIParent)
+    catcher:SetAllPoints(UIParent)
+    catcher:SetFrameStrata("MEDIUM")
+    catcher:EnableMouse(true)
+    catcher:Hide()
+    catcher:SetScript("OnMouseDown", function()
+        if EC.searchBox then EC.searchBox:ClearFocus() end
+    end)
+    self.focusCatcher = catcher
+
     local title = f:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
     title:SetPoint("TOP", 0, -16)
-    title:SetText("Checkpoints")
+    self.title = title
 
-    -- Bouton fermer
     local close = CreateFrame("Button", nil, f, "UIPanelCloseButton")
     close:SetPoint("TOPRIGHT", -4, -4)
 
-    -- Onglets continents
-    self.tabs = {}
+    -- Bouton reduire / agrandir
+    local minBtn = CreateFrame("Button", nil, f)
+    minBtn:SetSize(24, 24)
+    minBtn:SetPoint("TOPRIGHT", -30, -8)
+    minBtn:SetNormalTexture("Interface\\Buttons\\UI-Panel-CollapseButton-Up")
+    minBtn:SetPushedTexture("Interface\\Buttons\\UI-Panel-CollapseButton-Down")
+    minBtn:SetHighlightTexture("Interface\\Buttons\\UI-Panel-MinimizeButton-Highlight", "ADD")
+    minBtn:SetScript("OnClick", function()
+        EC.db.compact = not EC.db.compact
+        EC:ApplyMode()
+    end)
+    minBtn:SetScript("OnEnter", function(self)
+        GameTooltip:SetOwner(self, "ANCHOR_LEFT")
+        GameTooltip:AddLine(EC.db.compact and EC:L("expand") or EC:L("minimize"), 1, 1, 1)
+        GameTooltip:Show()
+    end)
+    minBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    self.minBtn = minBtn
+
+    -- Bouton de langue (haut gauche)
+    local langBtn = CreateFrame("Button", nil, f)
+    langBtn:SetSize(30, 20)
+    langBtn:SetPoint("TOPLEFT", 14, -12)
+    local lbg = langBtn:CreateTexture(nil, "BACKGROUND")
+    lbg:SetAllPoints()
+    lbg:SetTexture(0.20, 0.40, 0.65, 0.95)
+    local lhl = langBtn:CreateTexture(nil, "HIGHLIGHT")
+    lhl:SetAllPoints()
+    lhl:SetTexture(1, 1, 1, 0.15)
+    local ltext = langBtn:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    ltext:SetPoint("CENTER")
+    ltext:SetTextColor(1, 1, 1)
+    langBtn.text = ltext
+    langBtn:SetScript("OnClick", function()
+        EC:SetLanguage(EC.db.lang == "fr" and "en" or "fr")
+    end)
+    langBtn:SetScript("OnEnter", function(self)
+        GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+        GameTooltip:AddLine(EC:L("langTip"), 1, 1, 1)
+        GameTooltip:Show()
+    end)
+    langBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    self.langBtn = langBtn
+
+    -- Rangee 1 : continents
+    self.contTabs = {}
     local prev
     for i, info in ipairs(CONTINENT_TABS) do
-        local tab = MakeTab(f, info)
-        if i == 1 then
-            tab:SetPoint("TOPLEFT", 16, -44)
-        else
-            tab:SetPoint("LEFT", prev, "RIGHT", 4, 0)
-        end
+        local tab = MakeFilterTab(f, info, "continent")
+        if i == 1 then tab:SetPoint("TOPLEFT", 16, -42)
+        else tab:SetPoint("LEFT", prev, "RIGHT", 4, 0) end
         prev = tab
-        self.tabs[i] = tab
+        self.contTabs[i] = tab
     end
 
-    -- Barre de recherche
+    -- Rangee 2 : type
+    self.typeTabs = {}
+    prev = nil
+    for i, info in ipairs(TYPE_TABS) do
+        local tab = MakeFilterTab(f, info, "type")
+        if i == 1 then tab:SetPoint("TOPLEFT", 16, -66)
+        else tab:SetPoint("LEFT", prev, "RIGHT", 4, 0) end
+        prev = tab
+        self.typeTabs[i] = tab
+    end
+
+    -- Menu de tri (rangee 2, a droite)
+    local sortBtn = CreateFrame("Button", nil, f)
+    sortBtn:SetHeight(20)
+    sortBtn:SetPoint("TOPRIGHT", -14, -66)
+    local sbg = sortBtn:CreateTexture(nil, "BACKGROUND")
+    sbg:SetAllPoints()
+    sbg:SetTexture(0.18, 0.18, 0.22, 0.9)
+    local shl = sortBtn:CreateTexture(nil, "HIGHLIGHT")
+    shl:SetAllPoints()
+    shl:SetTexture(1, 1, 1, 0.12)
+    local stext = sortBtn:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    stext:SetPoint("CENTER")
+    sortBtn.text = stext
+    sortBtn:SetScript("OnEnter", function(self)
+        GameTooltip:SetOwner(self, "ANCHOR_LEFT")
+        GameTooltip:AddLine(EC:L("sortLabel"), 1, 1, 1)
+        GameTooltip:Show()
+    end)
+    sortBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    self.sortBtn = sortBtn
+
+    local menu = CreateFrame("Frame", nil, f)
+    menu:SetFrameStrata("DIALOG")
+    menu:SetBackdrop({
+        bgFile = "Interface\\ChatFrame\\ChatFrameBackground",
+        edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+        tile = true, tileSize = 16, edgeSize = 12,
+        insets = { left = 3, right = 3, top = 3, bottom = 3 },
+    })
+    menu:SetBackdropColor(0.05, 0.05, 0.05, 0.95)
+    menu:SetPoint("TOPRIGHT", sortBtn, "BOTTOMRIGHT", 0, -2)
+    menu:Hide()
+    local OPTH = 20
+    menu:SetSize(110, #SORT_MODES * OPTH + 8)
+    self.sortOptions = {}
+    for i, m in ipairs(SORT_MODES) do
+        local opt = CreateFrame("Button", nil, menu)
+        opt:SetHeight(OPTH)
+        opt:SetPoint("TOPLEFT", 4, -4 - (i - 1) * OPTH)
+        opt:SetPoint("TOPRIGHT", -4, -4 - (i - 1) * OPTH)
+        local ot = opt:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        ot:SetPoint("LEFT", 6, 0)
+        ot:SetJustifyH("LEFT")
+        opt.text = ot
+        opt.modeKey = m.key
+        opt.lkey = m.lkey
+        local ohl = opt:CreateTexture(nil, "HIGHLIGHT")
+        ohl:SetAllPoints()
+        ohl:SetTexture(1, 1, 1, 0.2)
+        opt:SetScript("OnClick", function(self)
+            EC.db.sortMode = self.modeKey
+            EC.sortMenu:Hide()
+            EC:UpdateSortLabel()
+            EC:Refresh()
+        end)
+        self.sortOptions[i] = opt
+    end
+    self.sortMenu = menu
+
+    sortBtn:SetScript("OnClick", function()
+        if menu:IsShown() then
+            menu:Hide()
+        else
+            EC:UpdateSortMenuTexts()
+            menu:Show()
+        end
+    end)
+
+    -- Bouton croix rouge : vide la recherche
+    local clearBtn = CreateFrame("Button", nil, f)
+    clearBtn:SetSize(20, 20)
+    clearBtn:SetPoint("TOPRIGHT", -20, -97)
+    clearBtn:SetNormalTexture("Interface\\Buttons\\UI-GroupLoot-Pass-Up")
+    clearBtn:SetPushedTexture("Interface\\Buttons\\UI-GroupLoot-Pass-Down")
+    clearBtn:SetHighlightTexture("Interface\\Buttons\\UI-GroupLoot-Pass-Highlight", "ADD")
+    self.clearBtn = clearBtn
+
+    -- Recherche
     local search = CreateFrame("EditBox", "EbonholdCheckpointsSearch", f, "InputBoxTemplate")
-    search:SetSize(FRAME_W - 56, 22)
-    search:SetPoint("TOPLEFT", 22, -74)
+    search:SetHeight(22)
+    search:SetPoint("TOPLEFT", 22, -98)
+    search:SetPoint("RIGHT", clearBtn, "LEFT", -4, 0)
     search:SetAutoFocus(false)
     search:SetScript("OnTextChanged", function(self)
         EC.search = self:GetText()
@@ -312,18 +961,27 @@ function EC:BuildUI()
     search:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
     self.searchBox = search
 
+    clearBtn:SetScript("OnClick", function()
+        search:SetText("")
+        search:ClearFocus()
+    end)
+
     local searchHint = f:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
     searchHint:SetPoint("LEFT", search, "LEFT", 4, 0)
-    searchHint:SetText("Rechercher...")
-    search:SetScript("OnEditFocusGained", function() searchHint:Hide() end)
+    self.searchHint = searchHint
+    search:SetScript("OnEditFocusGained", function()
+        searchHint:Hide()
+        EC.focusCatcher:Show()
+    end)
     search:SetScript("OnEditFocusLost", function(self)
+        EC.focusCatcher:Hide()
         if self:GetText() == "" then searchHint:Show() end
     end)
 
-    -- Zone de liste (scroll)
+    -- Zone de liste
     local listBG = CreateFrame("Frame", nil, f)
-    listBG:SetPoint("TOPLEFT", 16, -104)
-    listBG:SetPoint("BOTTOMRIGHT", -34, 44)
+    listBG:SetPoint("TOPLEFT", 16, LIST_TOP)
+    listBG:SetPoint("BOTTOMRIGHT", -34, LIST_BOTTOM)
     listBG:SetBackdrop({
         bgFile = "Interface\\ChatFrame\\ChatFrameBackground",
         edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
@@ -332,6 +990,7 @@ function EC:BuildUI()
     })
     listBG:SetBackdropColor(0, 0, 0, 0.5)
     listBG:SetBackdropBorderColor(0.4, 0.4, 0.4, 0.8)
+    self.listBG = listBG
 
     local scroll = CreateFrame("ScrollFrame", "EbonholdCheckpointsScroll", listBG, "FauxScrollFrameTemplate")
     scroll:SetPoint("TOPLEFT", 4, -4)
@@ -341,82 +1000,96 @@ function EC:BuildUI()
     end)
     self.scroll = scroll
 
-    -- Lignes reutilisables
     self.rowButtons = {}
-    for i = 1, NUM_ROWS do
-        local btn = CreateFrame("Button", nil, listBG)
-        btn:SetHeight(ROW_HEIGHT)
-        btn:SetPoint("TOPLEFT", scroll, "TOPLEFT", 0, -(i - 1) * ROW_HEIGHT)
-        btn:SetPoint("RIGHT", scroll, "RIGHT", 0, 0)
+    self:EnsureRows(self:VisibleRowCount())
 
-        local hl = btn:CreateTexture(nil, "HIGHLIGHT")
-        hl:SetAllPoints()
-        hl:SetTexture("Interface\\QuestFrame\\UI-QuestTitleHighlight")
-        hl:SetBlendMode("ADD")
-        hl:SetAlpha(0.3)
-        btn.highlight = hl
-
-        local icon = btn:CreateTexture(nil, "ARTWORK")
-        icon:SetSize(16, 16)
-        icon:SetPoint("LEFT", btn, "LEFT", 4, 0)
-        btn.icon = icon
-
-        local text = btn:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-        text:SetPoint("LEFT", btn, "LEFT", 26, 0)
-        text:SetPoint("RIGHT", btn, "RIGHT", -4, 0)
-        text:SetJustifyH("LEFT")
-        btn.text = text
-
-        btn:SetScript("OnClick", function(self)
-            if self.cp and self.cp.unlocked then
-                Teleport(self.cp)
-            end
-        end)
-        btn:SetScript("OnEnter", function(self)
-            if not self.cp then return end
-            GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-            GameTooltip:AddLine(self.cp.name, 1, 0.82, 0)
-            local cont = CONTINENT_NAMES[self.cp.serverMapId]
-            if cont then GameTooltip:AddLine(cont, 0.7, 0.7, 0.7) end
-            if self.cp.unlocked then
-                GameTooltip:AddLine("Clic pour se teleporter.", 0.4, 1, 0.4)
-            else
-                GameTooltip:AddLine("Verrouille - a debloquer en jeu.", 1, 0.35, 0.35)
-            end
-            GameTooltip:Show()
-        end)
-        btn:SetScript("OnLeave", function() GameTooltip:Hide() end)
-
-        self.rowButtons[i] = btn
-    end
-
-    -- Pied : case "afficher verrouilles" + compteur
+    -- Pied : cases + compteur
     local check = CreateFrame("CheckButton", "EbonholdCheckpointsLocked", f, "UICheckButtonTemplate")
-    check:SetSize(22, 22)
-    check:SetPoint("BOTTOMLEFT", 16, 14)
-    _G[check:GetName() .. "Text"]:SetText("Afficher les verrouilles")
+    check:SetSize(20, 20)
+    check:SetPoint("BOTTOMLEFT", 14, 14)
+    local checkText = _G[check:GetName() .. "Text"]
+    checkText:SetFontObject(GameFontHighlightSmall)
     check:SetScript("OnClick", function(self)
+        if EC.searchBox then EC.searchBox:ClearFocus() end
         EC.db.showLocked = self:GetChecked() and true or false
         EC:Refresh()
     end)
+    check:SetScript("OnEnter", function(self)
+        GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+        GameTooltip:AddLine(EC:L("lockedTip"), 1, 1, 1)
+        GameTooltip:Show()
+    end)
+    check:SetScript("OnLeave", function() GameTooltip:Hide() end)
     self.lockedCheck = check
 
+    local favCheck = CreateFrame("CheckButton", "EbonholdCheckpointsFavOnly", f, "UICheckButtonTemplate")
+    favCheck:SetSize(20, 20)
+    favCheck:SetPoint("LEFT", checkText, "RIGHT", 10, 0)
+    _G[favCheck:GetName() .. "Text"]:SetFontObject(GameFontHighlightSmall)
+    favCheck:SetScript("OnClick", function(self)
+        if EC.searchBox then EC.searchBox:ClearFocus() end
+        EC.db.favOnly = self:GetChecked() and true or false
+        EC:Refresh()
+    end)
+    favCheck:SetScript("OnEnter", function(self)
+        GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+        GameTooltip:AddLine(EC:L("favTip"), 1, 1, 1)
+        GameTooltip:Show()
+    end)
+    favCheck:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    self.favCheck = favCheck
+
     local footer = f:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
-    footer:SetPoint("BOTTOMRIGHT", -18, 20)
+    footer:SetPoint("BOTTOMRIGHT", -24, 20)
     footer:SetJustifyH("RIGHT")
     self.footer = footer
+
+    -- Poignee de redimensionnement
+    local grip = CreateFrame("Button", nil, f)
+    grip:SetSize(16, 16)
+    grip:SetPoint("BOTTOMRIGHT", -6, 7)
+    grip:SetNormalTexture("Interface\\ChatFrame\\UI-ChatIM-SizeGrabber-Up")
+    grip:SetHighlightTexture("Interface\\ChatFrame\\UI-ChatIM-SizeGrabber-Highlight")
+    grip:SetPushedTexture("Interface\\ChatFrame\\UI-ChatIM-SizeGrabber-Down")
+    grip:SetScript("OnMouseDown", function()
+        -- En mode reduit, seule la largeur est ajustable (hauteur auto).
+        f:StartSizing(EC.db.compact and "RIGHT" or "BOTTOMRIGHT")
+    end)
+    grip:SetScript("OnMouseUp", function()
+        f:StopMovingOrSizing()
+        if EC.db.compact then
+            EC.db.compactW = f:GetWidth()
+            EC.db.compactH = f:GetHeight()
+            EC:RefreshCompact()
+        else
+            EC.db.width = f:GetWidth()
+            EC.db.height = f:GetHeight()
+            EC:Refresh()
+        end
+    end)
+    self.resizeGrip = grip
+
+    -- Mode reduit
+    local compactFrame = CreateFrame("Frame", nil, f)
+    compactFrame:SetPoint("TOPLEFT", 12, -34)
+    compactFrame:SetPoint("BOTTOMRIGHT", -12, 8)
+    compactFrame:Hide()
+    self.compactFrame = compactFrame
+    self.compactRows = {}
+
+    local empty = compactFrame:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+    empty:SetPoint("TOP", 0, -6)
+    empty:SetWidth(COMPACT_W - 28)
+    self.compactEmpty = empty
+
+    self:UpdateLocaleTexts()
 end
 
 function EC:OnShow()
-    self.lockedCheck:SetChecked(self.db.showLocked)
-    self:UpdateTabs()
-
-    -- Force une demande de donnees au serveur, puis rafraichit.
+    self.search = self.searchBox:GetText()
+    self:ApplyMode()
     local svc = GetService()
-    if svc and svc.RequestCheckpoints then
-        svc.RequestCheckpoints()
-    end
-    self:Refresh()
+    if svc and svc.RequestCheckpoints then svc.RequestCheckpoints() end
     if C_Timer and C_Timer.After then
         C_Timer.After(0.6, function() EC:Refresh() end)
     end
@@ -459,15 +1132,11 @@ function EC:CreateMinimapButton()
     icon:SetSize(20, 20)
     icon:SetTexture("Interface\\Minimap\\Tracking\\FlightMaster")
     icon:SetPoint("TOPLEFT", 7, -6)
-    self.minimapIcon = icon
 
     local function UpdatePosition()
         local angle = math.rad(EC.db.minimapAngle)
-        local x = 80 * math.cos(angle)
-        local y = 80 * math.sin(angle)
-        btn:SetPoint("CENTER", Minimap, "CENTER", x, y)
+        btn:SetPoint("CENTER", Minimap, "CENTER", 80 * math.cos(angle), 80 * math.sin(angle))
     end
-    self.UpdateMinimapPosition = UpdatePosition
 
     btn:SetScript("OnDragStart", function(self)
         self:SetScript("OnUpdate", function()
@@ -479,15 +1148,13 @@ function EC:CreateMinimapButton()
             UpdatePosition()
         end)
     end)
-    btn:SetScript("OnDragStop", function(self)
-        self:SetScript("OnUpdate", nil)
-    end)
+    btn:SetScript("OnDragStop", function(self) self:SetScript("OnUpdate", nil) end)
     btn:SetScript("OnClick", function() EC:Toggle() end)
     btn:SetScript("OnEnter", function(self)
         GameTooltip:SetOwner(self, "ANCHOR_LEFT")
-        GameTooltip:AddLine("Ebonhold Checkpoints", 1, 0.82, 0)
-        GameTooltip:AddLine("Clic : ouvrir la liste de teleportation", 1, 1, 1)
-        GameTooltip:AddLine("Glisser : deplacer le bouton", 0.7, 0.7, 0.7)
+        GameTooltip:AddLine(EC:L("mmTitle"), 1, 0.82, 0)
+        GameTooltip:AddLine(EC:L("mmClick"), 1, 1, 1)
+        GameTooltip:AddLine(EC:L("mmDrag"), 0.7, 0.7, 0.7)
         GameTooltip:Show()
     end)
     btn:SetScript("OnLeave", function() GameTooltip:Hide() end)
@@ -502,7 +1169,9 @@ end
 
 local function ApplyDefaults(db)
     for k, v in pairs(DEFAULTS) do
-        if db[k] == nil then db[k] = v end
+        if db[k] == nil then
+            db[k] = (type(v) == "table") and {} or v
+        end
     end
     return db
 end
@@ -517,15 +1186,11 @@ loader:SetScript("OnEvent", function(self, event, arg1)
         EC.search = ""
         EC:CreateMinimapButton()
     elseif event == "PLAYER_ENTERING_WORLD" then
-        if EC.frame and EC.frame:IsShown() then
-            EC:Refresh()
-        end
+        if EC.frame and EC.frame:IsShown() then EC:Refresh() end
     end
 end)
 
 SLASH_EBONHOLDCP1 = "/tp"
 SLASH_EBONHOLDCP2 = "/cp"
 SLASH_EBONHOLDCP3 = "/checkpoint"
-SlashCmdList["EBONHOLDCP"] = function()
-    EC:Toggle()
-end
+SlashCmdList["EBONHOLDCP"] = function() EC:Toggle() end
