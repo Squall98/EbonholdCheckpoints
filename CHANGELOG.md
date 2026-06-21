@@ -1,5 +1,8 @@
 # Changelog
 
+## v1.2 — 2026-06-20
+- Mode réduit : la fenêtre ne se ferme plus après une téléportation et se rouvre automatiquement après l'écran de chargement, pour enchaîner les TP sans rouvrir la mini-barre.
+
 ## v1.1 — 2026-06-19
 - **Bilingue FR / EN** : interface et noms de lieux traduits (villes, zones, donjons, raids), bouton de bascule. Noms français extraits du client officiel frFR.
 - **Favoris** : étoile par destination, section dédiée, filtre « favoris seulement ».

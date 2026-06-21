@@ -257,9 +257,17 @@ local function Teleport(cp)
     if not (cp and cp.unlocked) then return end
     if svc and svc.UseCheckpoint then
         svc.UseCheckpoint(cp.id)
-        -- En mode reduit (mini-barre de favoris) on garde la fenetre ouverte
-        -- pour enchainer les teleportations.
-        if EC.frame and not EC.db.compact then EC.frame:Hide() end
+        if EC.db.compact then
+            -- Une teleportation entre zones declenche un ecran de chargement qui
+            -- masque la fenetre : on programme sa reouverture pour garder la
+            -- mini-barre de favoris disponible et enchainer les TP.
+            EC.pendingReopen = true
+            if C_Timer and C_Timer.After then
+                C_Timer.After(2, function() EC:TryReopenCompact() end)
+            end
+        elseif EC.frame then
+            EC.frame:Hide()
+        end
     end
 end
 
@@ -806,6 +814,8 @@ function EC:BuildUI()
 
     local close = CreateFrame("Button", nil, f, "UIPanelCloseButton")
     close:SetPoint("TOPRIGHT", -4, -4)
+    -- Fermeture volontaire : annule une eventuelle reouverture auto en attente.
+    close:HookScript("OnClick", function() EC.pendingReopen = false end)
 
     -- Bouton reduire / agrandir
     local minBtn = CreateFrame("Button", nil, f)
@@ -1097,6 +1107,16 @@ function EC:OnShow()
     end
 end
 
+-- Rouvre la mini-barre de favoris si un ecran de chargement (teleportation)
+-- l'a masquee. Appelee apres coup (timer + PLAYER_ENTERING_WORLD).
+function EC:TryReopenCompact()
+    if not self.pendingReopen then return end
+    self.pendingReopen = false
+    if self.db.compact and self.frame and not self.frame:IsShown() then
+        self.frame:Show()
+    end
+end
+
 function EC:Toggle()
     self:BuildUI()
     if self.frame:IsShown() then
@@ -1188,7 +1208,15 @@ loader:SetScript("OnEvent", function(self, event, arg1)
         EC.search = ""
         EC:CreateMinimapButton()
     elseif event == "PLAYER_ENTERING_WORLD" then
-        if EC.frame and EC.frame:IsShown() then EC:Refresh() end
+        if EC.pendingReopen then
+            if C_Timer and C_Timer.After then
+                C_Timer.After(0.3, function() EC:TryReopenCompact() end)
+            else
+                EC:TryReopenCompact()
+            end
+        elseif EC.frame and EC.frame:IsShown() then
+            EC:Refresh()
+        end
     end
 end)
 
