@@ -15,6 +15,11 @@
       - Fenetre redimensionnable (poignee en bas a droite).
       - Bilingue FR / EN (interface + noms de lieux) avec bouton de bascule.
         Les noms FR sont dans EbonholdCheckpoints_Names.lua (extraits du client frFR).
+
+    La liste arrive du serveur de facon asynchrone (evenement SEND_CHECKPOINTS_DATA) :
+    ProjectEbonhold reconstruit alors une NOUVELLE table puis appelle
+    ProjectEbonhold.CheckpointUI.RefreshPins(). On observe cet appel (post-hook) pour
+    rafraichir la fenetre des que la reponse est la, avec un repli temporise.
 ---------------------------------------------------------------------------]]
 
 local ADDON_NAME = ...
@@ -67,6 +72,7 @@ local LOCALE = {
         allDest = "Destinations", other = "Autre",
         c_all = "Tous", c_ek = "Est", c_kal = "Kalimdor", c_out = "Outreterre", c_north = "Norfendre",
         t_all = "Tous", t_flight = "Vol", t_dungeons = "Donjons", t_raids = "Raids",
+        noService = "Service de checkpoints introuvable.\n\nL'addon ProjectEbonhold est absent, desactive ou incompatible avec cette version. Verifie qu'il est active, puis tape /reload.",
     },
     en = {
         title = "Checkpoints",
@@ -89,6 +95,7 @@ local LOCALE = {
         allDest = "Destinations", other = "Other",
         c_all = "All", c_ek = "EK", c_kal = "Kalimdor", c_out = "Outland", c_north = "Northrend",
         t_all = "All", t_flight = "Flight", t_dungeons = "Dungeons", t_raids = "Raids",
+        noService = "Checkpoint service not found.\n\nThe ProjectEbonhold addon is missing, disabled or incompatible with this version. Make sure it is enabled, then type /reload.",
     },
 }
 
@@ -106,6 +113,7 @@ local CONTINENT_NAMES = {
 
 -- Traduit un nom de checkpoint token par token (FR uniquement).
 function EC:LocalizeName(name)
+    if not name then return "" end
     if self.db.lang ~= "fr" then return name end
     local map = _G.EbonholdCheckpointsNames
     if not map then return name end
@@ -126,30 +134,40 @@ local CONTINENT_TABS = {
     { key = 571,   lkey = "c_north" },
 }
 
--- kind du checkpoint -> categorie. kind nil = point de vol classique.
+-- Categories connues. "OTHER" recoit tout type que l'addon ne connait pas encore
+-- (nouveau kind ajoute plus tard cote serveur) au lieu de provoquer une erreur.
+local TYPE_LKEY = { FLIGHT = "flight", MEETINGSTONE = "dungeons", MEETINGSTONE_RAID = "raids", OTHER = "other" }
+local TYPE_ORDER = { "FLIGHT", "MEETINGSTONE", "MEETINGSTONE_RAID", "OTHER" }
+local TYPE_INDEX = { FLIGHT = 1, MEETINGSTONE = 2, MEETINGSTONE_RAID = 3, OTHER = 4 }
+
+-- kind du checkpoint -> categorie. kind nil = point de vol classique ;
+-- kind inconnu = "OTHER".
 local function KindKey(kind)
-    return kind or "FLIGHT"
+    if kind == nil then return "FLIGHT" end
+    if TYPE_INDEX[kind] then return kind end
+    return "OTHER"
 end
 
-local TYPE_LKEY = { FLIGHT = "flight", MEETINGSTONE = "dungeons", MEETINGSTONE_RAID = "raids" }
-local TYPE_ORDER = { "FLIGHT", "MEETINGSTONE", "MEETINGSTONE_RAID" }
-local TYPE_INDEX = { FLIGHT = 1, MEETINGSTONE = 2, MEETINGSTONE_RAID = 3 }
+-- Nom de tri (une entree sans nom ne doit pas faire planter table.sort).
+local function NameOf(cp)
+    return cp.name or ""
+end
 
--- Tri par type (vol, donjons, raids) puis par nom.
+-- Tri par type (vol, donjons, raids, autre) puis par nom.
 local function SortByTypeThenName(a, b)
     local ka, kb = KindKey(a.kind), KindKey(b.kind)
     if ka ~= kb then return TYPE_INDEX[ka] < TYPE_INDEX[kb] end
-    return a.name < b.name
+    return NameOf(a) < NameOf(b)
 end
 
 local function SortByName(a, b)
-    return a.name < b.name
+    return NameOf(a) < NameOf(b)
 end
 
 local function SortByContinentThenName(a, b)
     local ca, cb = a.serverMapId or 0, b.serverMapId or 0
     if ca ~= cb then return ca < cb end
-    return a.name < b.name
+    return NameOf(a) < NameOf(b)
 end
 
 local function GetComparator(mode)
@@ -178,6 +196,7 @@ local TYPE_ICON = {
     FLIGHT            = { tex = "Interface\\Minimap\\Tracking\\FlightMaster" },
     MEETINGSTONE      = { tex = "Interface\\LFGFrame\\LFG-Eye", coord = { 0, 0.125, 0, 0.25 } },
     MEETINGSTONE_RAID = { tex = "Interface\\Icons\\INV_Misc_Head_Dragon_01" },
+    OTHER             = { tex = "Interface\\Icons\\INV_Misc_QuestionMark" },
 }
 
 local function ApplyTypeIcon(tex, kind)
@@ -214,6 +233,12 @@ local function GetService()
     return ProjectEbonhold and ProjectEbonhold.CheckpointService
 end
 
+-- Vrai si le service serveur expose bien la liste des checkpoints.
+local function HasService()
+    local svc = GetService()
+    return type(svc) == "table" and type(svc.GetCheckpoints) == "function"
+end
+
 local function Normalize(s)
     if not s then return "" end
     return string.lower(s):gsub("%s+", " ")
@@ -234,18 +259,69 @@ end
 
 local function GetUniqueCheckpoints()
     local out = {}
-    local svc = GetService()
-    if not svc or not svc.GetCheckpoints then return out end
-    local list = svc.GetCheckpoints()
+    if not HasService() then return out end
+    local list = GetService().GetCheckpoints()
     if type(list) ~= "table" then return out end
     local seen = {}
     for _, cp in ipairs(list) do
-        if cp.factionAllowed ~= false and not seen[cp.id] then
+        if type(cp) == "table" and cp.id ~= nil and cp.factionAllowed ~= false and not seen[cp.id] then
             seen[cp.id] = true
             table.insert(out, cp)
         end
     end
     return out
+end
+
+-- Reponse du serveur : ProjectEbonhold remplace la table renvoyee par
+-- GetCheckpoints() a chaque reception (SEND_CHECKPOINTS_DATA) puis appelle
+-- CheckpointUI.RefreshPins(). RefreshPins est aussi appele a chaque mise a jour
+-- de la carte : on ne rafraichit donc que si la table a change.
+function EC:OnServerData()
+    self.awaitingData = false
+    if self.frame and self.frame:IsShown() then self:Refresh() end
+end
+
+function EC:InstallDataHook()
+    if self.dataHooked or not hooksecurefunc then return end
+    local ui = ProjectEbonhold and ProjectEbonhold.CheckpointUI
+    if type(ui) ~= "table" or type(ui.RefreshPins) ~= "function" then return end
+    self.dataHooked = true
+    if HasService() then self.lastList = GetService().GetCheckpoints() end
+    -- Post-hook : l'original s'execute normalement, on observe seulement.
+    hooksecurefunc(ui, "RefreshPins", function()
+        if not HasService() then return end
+        local list = GetService().GetCheckpoints()
+        if list == EC.lastList then return end
+        EC.lastList = list
+        -- Le rafraichissement est differe d'une image pour rester hors du
+        -- traitement de l'evenement serveur.
+        if C_Timer and C_Timer.After then
+            C_Timer.After(0, function() EC:OnServerData() end)
+        else
+            EC:OnServerData()
+        end
+    end)
+end
+
+-- Demande la liste au serveur. Le rafraichissement se fait a la reponse (hook
+-- ci-dessus) ; repli temporise si la reponse n'est pas detectee (hook absent,
+-- serveur lent).
+function EC:RequestData()
+    local svc = GetService()
+    if not (svc and type(svc.RequestCheckpoints) == "function") then return end
+    self:InstallDataHook()
+    -- Seule une table differente de l'actuelle signalera la reponse.
+    if HasService() then self.lastList = svc.GetCheckpoints() end
+    self.awaitingData = true
+    svc.RequestCheckpoints()
+    if C_Timer and C_Timer.After then
+        C_Timer.After(0.6, function()
+            if EC.awaitingData then EC:Refresh() end
+        end)
+        C_Timer.After(2.0, function()
+            if EC.awaitingData then EC:OnServerData() end
+        end)
+    end
 end
 
 --==========================================================================
@@ -337,7 +413,8 @@ function EC:BuildRows()
                 addSection(CONTINENT_NAMES[self.db.lang][id] or self:L("other"), groups[id])
             end
         else -- type
-            local buckets = { FLIGHT = {}, MEETINGSTONE = {}, MEETINGSTONE_RAID = {} }
+            local buckets = {}
+            for _, k in ipairs(TYPE_ORDER) do buckets[k] = {} end
             for _, cp in ipairs(others) do table.insert(buckets[KindKey(cp.kind)], cp) end
             for _, k in ipairs(TYPE_ORDER) do
                 if #buckets[k] > 0 then
@@ -428,7 +505,15 @@ function EC:Refresh()
         end
     end
 
-    self.footer:SetText(string.format(self:L("footer"), unlockedCount))
+    -- Service serveur absent : message explicite plutot qu'une liste vide.
+    local svcOK = HasService()
+    SetShown(self.listMsg, not svcOK)
+    if svcOK then
+        self.footer:SetText(string.format(self:L("footer"), unlockedCount))
+    else
+        self.listMsg:SetText(self:L("noService"))
+        self.footer:SetText("")
+    end
 end
 
 --==========================================================================
@@ -515,11 +600,19 @@ function EC:RefreshCompact()
     for i = n + 1, #self.compactRows do
         self.compactRows[i]:Hide()
     end
+    -- Liste vide : "aucun favori", ou message d'erreur si le service manque.
+    if n == 0 then
+        self.compactEmpty:SetWidth(math.max(60, availW - 8))
+        self.compactEmpty:SetText(HasService() and self:L("compactEmpty") or self:L("noService"))
+    end
     SetShown(self.compactEmpty, n == 0)
 
     -- Hauteur auto = juste ce qu'il faut pour contenir toutes les lignes.
     local usedRows = math.max(1, math.ceil(math.max(n, 1) / cols))
     local h = 34 + usedRows * ROW_HEIGHT + 12
+    if n == 0 then
+        h = math.max(h, 34 + 6 + self.compactEmpty:GetStringHeight() + 12)
+    end
     if h > MAX_H then h = MAX_H end
     if math.abs(self.frame:GetHeight() - h) > 0.5 then
         self.frame:SetHeight(h)
@@ -1002,6 +1095,15 @@ function EC:BuildUI()
     listBG:SetBackdropBorderColor(0.4, 0.4, 0.4, 0.8)
     self.listBG = listBG
 
+    -- Message affiche a la place de la liste si le service serveur manque.
+    local listMsg = listBG:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    listMsg:SetPoint("LEFT", listBG, "LEFT", 16, 0)
+    listMsg:SetPoint("RIGHT", listBG, "RIGHT", -16, 0)
+    listMsg:SetJustifyH("CENTER")
+    listMsg:SetTextColor(1, 0.45, 0.35)
+    listMsg:Hide()
+    self.listMsg = listMsg
+
     local scroll = CreateFrame("ScrollFrame", "EbonholdCheckpointsScroll", listBG, "FauxScrollFrameTemplate")
     scroll:SetPoint("TOPLEFT", 4, -4)
     scroll:SetPoint("BOTTOMRIGHT", -26, 4)
@@ -1098,11 +1200,8 @@ end
 function EC:OnShow()
     self.search = self.searchBox:GetText()
     self:ApplyMode()
-    local svc = GetService()
-    if svc and svc.RequestCheckpoints then svc.RequestCheckpoints() end
-    if C_Timer and C_Timer.After then
-        C_Timer.After(0.6, function() EC:Refresh() end)
-    end
+    -- Affiche tout de suite la liste connue, puis la rafraichit a la reponse.
+    self:RequestData()
 end
 
 -- Rouvre effectivement la mini-barre si une reouverture est en attente.
@@ -1231,6 +1330,9 @@ loader:SetScript("OnEvent", function(self, event, arg1)
         EC.db = EbonholdCheckpointsDB
         EC.search = ""
         EC:CreateMinimapButton()
+        -- ProjectEbonhold (dependance) est deja charge : on observe ses mises a
+        -- jour pour rafraichir aussi une fenetre deja ouverte (ex. nouveau checkpoint).
+        EC:InstallDataHook()
     elseif event == "PLAYER_ENTERING_WORLD" then
         if EC.db and EC.db.pendingReopen then
             EC:ScheduleReopen()

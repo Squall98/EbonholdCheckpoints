@@ -2,7 +2,7 @@
 ## Title: Ebonhold |cff66ccffCheckpoints|r
 ## Notes: Teleportation rapide vers les checkpoints debloques (recherche + categories + favoris, FR/EN).
 ## Author: Guide Ebonhold
-## Version: 1.2
+## Version: 1.3
 ## Dependencies: ProjectEbonhold
 ## SavedVariables: EbonholdCheckpointsDB
 
