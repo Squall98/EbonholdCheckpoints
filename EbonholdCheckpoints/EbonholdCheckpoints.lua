@@ -259,12 +259,10 @@ local function Teleport(cp)
         svc.UseCheckpoint(cp.id)
         if EC.db.compact then
             -- Une teleportation entre zones declenche un ecran de chargement qui
-            -- masque la fenetre : on programme sa reouverture pour garder la
-            -- mini-barre de favoris disponible et enchainer les TP.
-            EC.pendingReopen = true
-            if C_Timer and C_Timer.After then
-                C_Timer.After(2, function() EC:TryReopenCompact() end)
-            end
+            -- masque (voire reinitialise) la fenetre : on memorise l'intention
+            -- de reouverture et on reessaie apres le chargement.
+            EC.db.pendingReopen = true
+            EC:ScheduleReopen()
         elseif EC.frame then
             EC.frame:Hide()
         end
@@ -815,7 +813,7 @@ function EC:BuildUI()
     local close = CreateFrame("Button", nil, f, "UIPanelCloseButton")
     close:SetPoint("TOPRIGHT", -4, -4)
     -- Fermeture volontaire : annule une eventuelle reouverture auto en attente.
-    close:HookScript("OnClick", function() EC.pendingReopen = false end)
+    close:HookScript("OnClick", function() if EC.db then EC.db.pendingReopen = false end end)
 
     -- Bouton reduire / agrandir
     local minBtn = CreateFrame("Button", nil, f)
@@ -1107,14 +1105,40 @@ function EC:OnShow()
     end
 end
 
--- Rouvre la mini-barre de favoris si un ecran de chargement (teleportation)
--- l'a masquee. Appelee apres coup (timer + PLAYER_ENTERING_WORLD).
-function EC:TryReopenCompact()
-    if not self.pendingReopen then return end
-    self.pendingReopen = false
-    if self.db.compact and self.frame and not self.frame:IsShown() then
+-- Rouvre effectivement la mini-barre si une reouverture est en attente.
+-- L'intention (pendingReopen) est stockee dans les SavedVariables : elle survit
+-- donc meme si le changement de continent reinitialise l'addon (comportement
+-- "reload" du serveur). On reconstruit l'UI au besoin.
+function EC:DoReopen()
+    if not (self.db and self.db.pendingReopen) then return end
+    if not self.db.compact then
+        self.db.pendingReopen = false
+        return
+    end
+    self:BuildUI()
+    if self.frame and not self.frame:IsShown() then
+        if self.db.point then
+            local p = self.db.point
+            self.frame:ClearAllPoints()
+            self.frame:SetPoint(p[1], UIParent, p[2], p[3], p[4])
+        end
         self.frame:Show()
     end
+end
+
+-- Programme plusieurs tentatives de reouverture apres une teleportation, le
+-- temps que l'ecran de chargement se termine (l'UI peut etre masquee tardivement).
+function EC:ScheduleReopen()
+    if not (C_Timer and C_Timer.After) then
+        self:DoReopen()
+        return
+    end
+    for _, d in ipairs({ 0.3, 1.0, 2.0, 3.5 }) do
+        C_Timer.After(d, function() EC:DoReopen() end)
+    end
+    C_Timer.After(5.0, function()
+        if EC.db then EC.db.pendingReopen = false end
+    end)
 end
 
 function EC:Toggle()
@@ -1208,12 +1232,8 @@ loader:SetScript("OnEvent", function(self, event, arg1)
         EC.search = ""
         EC:CreateMinimapButton()
     elseif event == "PLAYER_ENTERING_WORLD" then
-        if EC.pendingReopen then
-            if C_Timer and C_Timer.After then
-                C_Timer.After(0.3, function() EC:TryReopenCompact() end)
-            else
-                EC:TryReopenCompact()
-            end
+        if EC.db and EC.db.pendingReopen then
+            EC:ScheduleReopen()
         elseif EC.frame and EC.frame:IsShown() then
             EC:Refresh()
         end
