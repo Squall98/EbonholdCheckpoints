@@ -5,6 +5,7 @@
 - Un type de checkpoint inconnu de l'addon (ajouté plus tard côté serveur) ne provoque plus d'erreur : il est rangé dans un groupe « Autre », après les raids.
 - Si le service de checkpoints de ProjectEbonhold est introuvable, la fenêtre affiche un message explicite au lieu d'une liste vide.
 - La liste se rafraîchit dès que le serveur répond, au lieu d'attendre 0,6 s ; un rafraîchissement temporisé reste en secours.
+- Textes français avec leurs accents (« débloqués », « téléportation »…).
 
 *English*
 - Compact mode: reopening after a teleport to another continent is now reliable (the reopen request survives a UI reload during the loading screen; several attempts after loading).
